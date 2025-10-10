@@ -19,7 +19,7 @@ library_dirs = [
 # https://www.hlibpro.com/doc/3.1/install.html
 # https://www.intel.com/content/www/us/en/develop/documentation/get-started-with-mkl-for-dpcpp/top.html
 libraries = [
-    "hpro",
+    # "hpro",
     "lapack",
     "blas",
     "boost_filesystem",

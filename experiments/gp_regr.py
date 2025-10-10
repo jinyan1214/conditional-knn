@@ -8,6 +8,11 @@ import sklearn.datasets as datasets
 import sklearn.gaussian_process.kernels as kernels
 from sklearn.model_selection import train_test_split
 
+# Add path to KoLesky
+import sys
+script_path = os.path.abspath(__file__)
+sys.path.append(os.path.dirname(os.path.dirname(script_path)))
+
 from KoLesky import cholesky, cknn
 from KoLesky import gp_regression as gp_regr
 from KoLesky.gp_regression import coverage, grid, rmse
@@ -26,7 +31,7 @@ from . import (
     silver,
 )
 
-DATASET = "oco2"
+DATASET = "grid"
 ROOT = f"experiments/gp/{DATASET}"
 
 fnamey = f"{ROOT}/y.npy"
@@ -41,7 +46,7 @@ plot = lambda *args, **kwargs: plot__(*args, **kwargs, root=ROOT)
 # fmt: off
 D = 3         # dimension of points
 # D = 6         # dimension of points
-N = 2**16     # number of total points
+N = 2**10     # number of total points
 # N = 2**10
 TTS = 0.1     # percentage of testing points
 
@@ -243,7 +248,7 @@ def test_regr(
     loss = np.mean(rmse(y_test, mu_pred))
     emperical_coverage = np.mean(coverage(y_test, mu_pred, var_pred))
 
-    nnz = L.nnz if hasattr(L, "nnz") else np.product(L.shape)
+    nnz = L.nnz if hasattr(L, "nnz") else np.prod(L.shape)
     return loss, det, emperical_coverage, time_regr, nnz
 
 
@@ -255,7 +260,8 @@ if __name__ == "__main__":
     points, y, m = get_dataset(DATASET)
     points = points[:, :D]
     print(f"original number of points: {len(points)}")
-    points = remove_duplicates(points)
+    if DATASET not in ['grid']:
+        points = remove_duplicates(points)
     print(f" cleaned number of points: {len(points)}")
     # length_scales = np.array([np.var(points[m:, d]) for d in range(D)])
     length_scales = np.array(

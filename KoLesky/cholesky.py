@@ -1,6 +1,8 @@
+import os
 import numpy as np
 import scipy.linalg
 import scipy.sparse as sparse
+import gc
 
 from . import cknn, ordering
 from .cknn import inv, logdet, solve
@@ -63,10 +65,30 @@ def inv_order(order: Ordering) -> Ordering:
 
 def chol(theta: Matrix, sigma: float = 1e-6) -> Matrix:
     """Cholesky factor for the covariance."""
-    try:
-        return np.linalg.cholesky(theta)
-    except np.linalg.LinAlgError:
-        return np.linalg.cholesky(theta + sigma * np.identity(theta.shape[0]))
+    solved = False
+    theta_org = theta.copy()
+    while not solved:
+        try:
+            return np.linalg.cholesky(theta)
+        except np.linalg.LinAlgError:
+            theta = theta_org + sigma * np.identity(theta.shape[0])
+            if sigma > 1e-3:
+                print(f"Warning: Added jitter of {sigma/10} to the diagonal")
+            sigma *= 10
+            if sigma > 1e-1:
+                raise ValueError("Input matrix is not positive definite after adding jitter up to 1e-2")
+            
+    # try:
+    #     return np.linalg.cholesky(theta)
+    # except np.linalg.LinAlgError:
+    #     try:
+    #         return np.linalg.cholesky(theta + sigma * np.identity(theta.shape[0]))
+    #     except np.linalg.LinAlgError:
+    #         try:
+    #             return np.linalg.cholesky(theta + sigma*10 * np.identity(theta.shape[0]))
+    #         except np.linalg.LinAlgError:
+    #                 np.save("/resnick/groups/enceladus/jyzhao/Conditional-knn/failed_matrix.npy", theta)
+    #                 raise ValueError("Input matrix is not positive definite")
 
 
 def to_dense(L: Sparse, order: Ordering, overwrite: bool = False) -> Matrix:
@@ -120,10 +142,28 @@ def __mult_cholesky(
 ) -> Sparse:
     """Computes the best Cholesky factor following the sparsity pattern."""
     # O((n/m)*(s^3 + m*s^2)) = O((n s^3)/m)
+    useMPI = os.getenv('useMPI', '0')
+    if useMPI == '1':
+        from mpi4py import MPI
+        comm = MPI.COMM_WORLD
+        rank = comm.Get_rank()
+        size = comm.Get_size()
+        if rank == 0:
+            print(f"Using MPI with {size} processes")
+    else:
+        rank = 0
+        size = 1
     n = len(x)
     indptr = np.cumsum([0] + [len(sparsity[i]) for i in range(n)])
-    data, indexes = np.zeros(indptr[-1]), np.zeros(indptr[-1])
-    for group in groups:
+    data, indexes = np.zeros(indptr[-1]), np.zeros(indptr[-1], dtype=np.int64)
+    data = np.ascontiguousarray(data)
+    indexes = np.ascontiguousarray(indexes)
+    # for group in groups:
+    from tqdm import tqdm
+    for grp_i, group in tqdm(enumerate(groups), total=len(groups), 
+                             desc=f"Process {rank}/{size} Cholesky groups", leave=True):
+        if grp_i % size != rank:
+            continue
         # points only interact with points after them (lower triangularity)
         s = sorted(sparsity[min(group)])  # type: ignore
         positions = {i: k for k, i in enumerate(s)}
@@ -135,7 +175,24 @@ def __mult_cholesky(
             col = scipy.linalg.solve_triangular(L, e_k, lower=True)
             data[indptr[i] : indptr[i + 1]] = col[k:]
             indexes[indptr[i] : indptr[i + 1]] = s[k:]
-
+    if useMPI == '1':
+        print(f"Process {rank} finished its groups")
+        gc.collect()
+        comm.Barrier()
+        # comm.Allreduce(MPI.IN_PLACE, data, op=MPI.SUM)
+        # comm.Allreduce(MPI.IN_PLACE, indexes, op=MPI.SUM)
+        if rank == 0:
+            out_data = np.empty_like(data, dtype=np.float64)
+            out_indexes = np.empty_like(indexes, dtype=np.int64)
+            print(f"Process {rank} out memory allocated")
+        else:
+            out_data = data
+            out_indexes = indexes
+        comm.Reduce(data, out_data, op=MPI.SUM, root=0)
+        comm.Reduce(indexes, out_indexes, op=MPI.SUM, root=0)
+        data = out_data
+        indexes = out_indexes
+        comm.Barrier()
     return sparse.csc_matrix((data, indexes, indptr), shape=(n, n))
 
 
@@ -402,9 +459,10 @@ def __cholesky_subsample(
     actual_total = 0
     columns_left = len(x)
     # process groups in order of increasing candidate set size
-    for group, candidates in sorted(
+    from tqdm import tqdm
+    for group, candidates in tqdm(sorted(
         zip(ref_groups, group_candidates), key=lambda g: len(g[1])
-    ):
+    ), total=len(ref_groups), desc="Select pattern for Cholesky groups", leave=True):
         m = len(group)
         # select within existing sparsity pattern
         num = max(cutoff + (expected_total - actual_total) // columns_left, 0)

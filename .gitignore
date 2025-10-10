@@ -24,3 +24,6 @@ output/
 # hlibpro
 include/
 lib/
+# virtual environment
+.venv/
+.vscode/
