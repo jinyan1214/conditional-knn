@@ -3,6 +3,7 @@ import numpy as np
 import scipy.linalg
 import scipy.sparse as sparse
 import gc
+from tqdm import tqdm
 
 from . import cknn, ordering
 from .cknn import inv, logdet, solve
@@ -158,6 +159,8 @@ def __mult_cholesky(
     data, indexes = np.zeros(indptr[-1]), np.zeros(indptr[-1], dtype=np.int64)
     data = np.ascontiguousarray(data)
     indexes = np.ascontiguousarray(indexes)
+
+    owned_idx = np.array([], dtype=np.int64)
     # for group in groups:
     from tqdm import tqdm
     for grp_i, group in tqdm(enumerate(groups), total=len(groups), 
@@ -175,24 +178,49 @@ def __mult_cholesky(
             col = scipy.linalg.solve_triangular(L, e_k, lower=True)
             data[indptr[i] : indptr[i + 1]] = col[k:]
             indexes[indptr[i] : indptr[i + 1]] = s[k:]
+            owned_idx = np.concatenate((owned_idx, np.arange(indptr[i], indptr[i + 1], dtype=np.int64)))
     if useMPI == '1':
         print(f"Process {rank} finished its groups")
-        gc.collect()
+        # Use reduce to gather results
+        # # gc.collect()
+        # comm.Barrier()
+        # # comm.Allreduce(MPI.IN_PLACE, data, op=MPI.SUM)
+        # # comm.Allreduce(MPI.IN_PLACE, indexes, op=MPI.SUM)
+        # if rank == 0:
+        #     out_data = np.empty_like(data, dtype=np.float64)
+        #     out_indexes = np.empty_like(indexes, dtype=np.int64)
+        #     print(f"Process {rank} out memory allocated")
+        # else:
+        #     out_data = data
+        #     out_indexes = indexes
+        # comm.Reduce(data, out_data, op=MPI.SUM, root=0)
+        # comm.Reduce(indexes, out_indexes, op=MPI.SUM, root=0)
+        # data = out_data
+        # indexes = out_indexes
+        # comm.Barrier()
+        # Use gather to collect results
+        all_owned_idx = comm.gather(owned_idx, root=0)
+        all_data = comm.gather(data[owned_idx], root=0)
+        all_indexes = comm.gather(indexes[owned_idx], root=0)
         comm.Barrier()
-        # comm.Allreduce(MPI.IN_PLACE, data, op=MPI.SUM)
-        # comm.Allreduce(MPI.IN_PLACE, indexes, op=MPI.SUM)
         if rank == 0:
-            out_data = np.empty_like(data, dtype=np.float64)
-            out_indexes = np.empty_like(indexes, dtype=np.int64)
-            print(f"Process {rank} out memory allocated")
-        else:
-            out_data = data
-            out_indexes = indexes
-        comm.Reduce(data, out_data, op=MPI.SUM, root=0)
-        comm.Reduce(indexes, out_indexes, op=MPI.SUM, root=0)
-        data = out_data
-        indexes = out_indexes
+            print(f"Process {rank} starting to combine results")
+            idx = np.concatenate(all_owned_idx)
+            tmp_data = np.concatenate(all_data)
+            tmp_indexes = np.concatenate(all_indexes)
+            order = np.argsort(idx)
+            idx = idx[order]    
+            out_data = np.empty_like(tmp_data, dtype=np.float64)
+            out_indexes = np.empty_like(tmp_indexes, dtype=np.int64)
+            print(f"Process {rank} output memory allocated")
+            out_data = tmp_data[order]
+            out_indexes = tmp_indexes[order]
+            data = out_data
+            indexes = out_indexes
         comm.Barrier()
+    # if rank == 0:
+    #     np.save(f"/work2/07059/jyzhao/stampede3/cybershake_ngmm_prediction/cholesky_data_parallel.npy", data)
+    #     np.save(f"/work2/07059/jyzhao/stampede3/cybershake_ngmm_prediction/cholesky_indexes_parallel.npy", indexes)
     return sparse.csc_matrix((data, indexes, indptr), shape=(n, n))
 
 
@@ -431,6 +459,7 @@ def __cholesky_subsample(
     candidate_sparsity: Sparsity,
     ref_groups: Grouping,
     select: Select,
+    useMPI: bool = False
 ) -> Sparse:
     """Subsample Cholesky within a reference sparsity and groups."""
     sparsity = {}
@@ -458,29 +487,88 @@ def __cholesky_subsample(
     expected_total = entries_left - np.sum(np.minimum(sizes, cutoff))
     actual_total = 0
     columns_left = len(x)
-    # process groups in order of increasing candidate set size
-    from tqdm import tqdm
-    for group, candidates in tqdm(sorted(
-        zip(ref_groups, group_candidates), key=lambda g: len(g[1])
-    ), total=len(ref_groups), desc="Select pattern for Cholesky groups", leave=True):
-        m = len(group)
-        # select within existing sparsity pattern
-        num = max(cutoff + (expected_total - actual_total) // columns_left, 0)
-        selected = (
-            select(x, candidates, np.array(group), kernel, num)  # type: ignore
-            if select == cknn.chol_select or select == cknn.nonadj_select
-            else select(x[candidates], x[group], kernel, num)  # type: ignore
+    if not useMPI:    
+        # process groups in order of increasing candidate set size
+        for group, candidates in tqdm(sorted(
+            zip(ref_groups, group_candidates), key=lambda g: len(g[1])
+        ), total=len(ref_groups), desc="Select pattern for Cholesky groups", leave=True):
+            m = len(group)
+            # select within existing sparsity pattern
+            num = max(cutoff + (expected_total - actual_total) // columns_left, 0)
+            selected = (
+                select(x, candidates, np.array(group), kernel, num)  # type: ignore
+                if select == cknn.chol_select or select == cknn.nonadj_select
+                else select(x[candidates], x[group], kernel, num)  # type: ignore
+            )
+            s = sorted(group + list(candidates[selected]))
+            sparsity[group[0]] = s
+            positions = {i: k for k, i in enumerate(s)}
+            for i in group[1:]:
+                # fill in blanks for rest to maintain proper number
+                sparsity[i] = Empty(len(s) - positions[i])
+            # update counters
+            expected_total += m * min(cutoff, len(candidates))
+            actual_total += sum(len(sparsity[i]) for i in group) - m * (m + 1) // 2
+            columns_left -= m
+    else:
+        from mpi4py import MPI
+        comm = MPI.COMM_WORLD
+        rank = comm.Get_rank()
+        size = comm.Get_size()
+        if rank == 0:
+            print(f"Using MPI with {size} processes for sparse pattern selection")
+        sparsity_local = {}
+
+        n_iter = len(ref_groups)
+        n_rounds = int(np.ceil(n_iter / size))
+
+        iterator = list(sorted(
+            zip(ref_groups, group_candidates), key=lambda g: len(g[1]))
         )
-        s = sorted(group + list(candidates[selected]))
-        sparsity[group[0]] = s
-        positions = {i: k for k, i in enumerate(s)}
-        for i in group[1:]:
-            # fill in blanks for rest to maintain proper number
-            sparsity[i] = Empty(len(s) - positions[i])
-        # update counters
-        expected_total += m * min(cutoff, len(candidates))
-        actual_total += sum(len(sparsity[i]) for i in group) - m * (m + 1) // 2
-        columns_left -= m
+        # process groups in order of increasing candidate set size
+        for round_idx in range(n_rounds):
+            it_idx = round_idx * size + rank
+            if it_idx >= n_iter:
+                total_increase_local = np.zeros(1, dtype=np.int64)
+                actual_increase_local = np.zeros(1, dtype=np.int64)
+                total_columns_left_local = np.zeros(1, dtype=np.int64)
+            else:
+                group, candidates = iterator[it_idx]
+                m = len(group)
+                # select within existing sparsity pattern
+                num = max(cutoff + (expected_total - actual_total) // columns_left, 0)
+                selected = (
+                    select(x, candidates, np.array(group), kernel, num)  # type: ignore
+                    if select == cknn.chol_select or select == cknn.nonadj_select
+                    else select(x[candidates], x[group], kernel, num)  # type: ignore
+                )
+                s = sorted(group + list(candidates[selected]))
+                sparsity_local[group[0]] = s
+                positions = {i: k for k, i in enumerate(s)}
+                for i in group[1:]:
+                    # fill in blanks for rest to maintain proper number
+                    sparsity_local[i] = Empty(len(s) - positions[i])
+                total_increase_local = np.array(m * min(cutoff, len(candidates)), dtype=np.int64)
+                actual_increase_local = np.array(sum(len(sparsity_local[i]) for i in group) - m * (m + 1) // 2, dtype=np.int64)
+                total_columns_left_local = np.array(m, dtype=np.int64)
+            # update counters
+            # use Allreduce to get expected total increase across all processes
+            total_increase = np.zeros(1, dtype=np.int64)
+            comm.Allreduce(total_increase_local, total_increase, op=MPI.SUM)
+            expected_total += total_increase[0]
+            # Use Allreduce to get actual total increase across all processes
+            actual_increase = np.zeros(1, dtype=np.int64)
+            comm.Allreduce(actual_increase_local, actual_increase, op=MPI.SUM)
+            actual_total += actual_increase[0]
+            # Use Allreduce to get total columns left across all processes
+            total_columns_left = np.zeros(1, dtype=np.int64)
+            comm.Allreduce(total_columns_left_local, total_columns_left, op=MPI.SUM)
+            columns_left -= total_columns_left[0]
+        # Gather and broadcast sparsity from all processes
+        all_sparsity_dicts = comm.allgather(sparsity_local)
+        sparsity = {}
+        for d in all_sparsity_dicts:
+            sparsity.update(d)
 
     return __mult_cholesky(x, kernel, sparsity, ref_groups)
 
@@ -597,6 +685,7 @@ def cholesky_joint_subsample(
     lambd: float | None = None,
     p: int = 1,
     select: Select = cknn.chol_select,
+    useMPI: bool = False
 ) -> CholeskyFactor:
     """Cholesky of the joint covariance with subsampling."""
     # standard geometric algorithm
@@ -606,7 +695,8 @@ def cholesky_joint_subsample(
     candidate_sparsity = ordering.sparsity_pattern(x, lengths, s * rho)
     return (
         __cholesky_subsample(
-            x, kernel, sparsity, candidate_sparsity, groups, select
+            x, kernel, sparsity, candidate_sparsity, groups, select,
+            useMPI=useMPI
         ),
         order,
     )
