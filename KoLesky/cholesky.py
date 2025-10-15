@@ -526,7 +526,7 @@ def __cholesky_subsample(
             zip(ref_groups, group_candidates), key=lambda g: len(g[1]))
         )
         # process groups in order of increasing candidate set size
-        for round_idx in range(n_rounds):
+        for round_idx in tqdm(range(n_rounds)):
             it_idx = round_idx * size + rank
             if it_idx >= n_iter:
                 total_increase_local = np.zeros(1, dtype=np.int64)
@@ -689,10 +689,28 @@ def cholesky_joint_subsample(
 ) -> CholeskyFactor:
     """Cholesky of the joint covariance with subsampling."""
     # standard geometric algorithm
+    if useMPI:
+        from mpi4py import MPI
+        comm = MPI.COMM_WORLD
+        rank = comm.Get_rank()
+    else:
+        rank = 0
+    if rank == 0:
+        print(f"Cholesky joint ordering, useMPI={useMPI}")
     x, order, lengths = __joint_order(x_train, x_test, p=p)
+    if rank == 0:
+        print(f"Cholesky joint grouping, useMPI={useMPI}")
     sparsity, groups = __cholesky_kl(x, lengths, rho, lambd)
     # create bigger sparsity pattern for candidates
+    if rank == 0:
+        print(f"Cholesky joint candidate sparsity, useMPI={useMPI}")
     candidate_sparsity = ordering.sparsity_pattern(x, lengths, s * rho)
+    if rank == 0:
+        print(f"Cholesky joint subsampling, useMPI={useMPI}")
+    if useMPI:
+        comm.Barrier()
+        if rank == 0:
+            print("Starting MPI Cholesky subsampling")
     return (
         __cholesky_subsample(
             x, kernel, sparsity, candidate_sparsity, groups, select,
