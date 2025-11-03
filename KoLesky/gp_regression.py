@@ -3,6 +3,7 @@ import scipy.linalg
 import scipy.sparse as sparse
 import scipy.stats as stats
 from numpy.fft import fftn, ifftn
+from threadpoolctl import threadpool_info
 
 from .cholesky import chol, inv_order, logdet, prec_logdet
 from .cknn import solve
@@ -63,8 +64,14 @@ def joint_inv_chol(
     return inv_chol(np.vstack((x_test, x_train)), kernel)
 
 
-def solve_triangular(L: Sparse, b: Vector, lower: bool = True) -> Vector:
+def solve_triangular(L: Sparse, b: Vector, lower: bool = True,
+                     print_threads: bool = False) -> Vector:
     """Solve the system Lx = b for sparse lower triangular L."""
+    if print_threads:
+        for pool in threadpool_info():
+            print(pool)
+            # print(f"{pool['internal_api']}: {pool['num_threads']} threads, "
+            #       f"library: {pool['filename']}")
     return (
         scipy.linalg.solve_triangular(L, b, lower=lower)
         if isinstance(L, np.ndarray)
