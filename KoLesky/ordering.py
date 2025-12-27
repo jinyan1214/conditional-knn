@@ -1,6 +1,6 @@
 import numpy as np
 import scipy.spatial.distance
-from scipy.spatial import KDTree
+from scipy.spatial import cKDTree, KDTree
 
 from .c_ordering import update_dists
 from .maxheap import Heap
@@ -212,7 +212,8 @@ def naive_p_reverse_maximin(
 
 
 def p_reverse_maximin(
-    x: Points, initial: Points | None = None, p: int = 1
+    x: Points, initial: Points | None = None, p: int = 1,
+    verbose: bool = False
 ) -> tuple[Ordering, LengthScales]:
     """Return the reverse maximin ordering and length scales."""
     inf = 1e6
@@ -227,23 +228,45 @@ def p_reverse_maximin(
         dists = np.array([[-i + inf] * p for i in range(n)])
     # use the initial points
     else:
-        initial_tree = KDTree(initial)
+        initial_tree = cKDTree(initial)
         dists, _ = initial_tree.query(x, p)
         dists = dists.reshape(n, p)  # type: ignore
 
     # initialize tree and heap
-    tree = KDTree(x)
+    import time
+    if verbose:
+        print("p_reverse_maximin: Start initialize cKDTree")
+    tree = cKDTree(x)
+    if verbose:
+        print("p_reverse_maximin: Start initialize heap")
     heap = Heap(np.max(dists, axis=1), np.arange(n))
+    if verbose:
+        print("p_reverse_maximin: Start loop")
+        from tqdm import tqdm
 
-    for i in range(n - 1, -1, -1):
+    update_dist_time=0
+    query_time=0
+    if verbose:
+        iteration = tqdm(range(n - 1, -1, -1), total=n)
+    else:
+        iteration = range(n - 1, -1, -1)
+    for i in iteration:
+    # for i in tqdm(range(100, -1, -1), total=n):
         # select point with largest minimum distance
         lk, k = heap.pop()
         indexes[i] = k
         # update distances
         lengths[i] = lk if lk < inf - n else np.inf
+        start_time = time.time()
         js = tree.query_ball_point(x[k], lk)
+        query_time += time.time() - start_time
         dists_k = euclidean(x[js], x[k : k + 1]).flatten()
+        start_time = time.time()
         update_dists(heap, dists, dists_k, np.array(js, dtype=np.int64))
+        update_dist_time += time.time() - start_time
+    if verbose:
+        print(f"p_reverse_maximin: Total distance update time: {update_dist_time} seconds")
+        print(f"p_reverse_maximin: Total query time: {query_time} seconds")
 
     return indexes, lengths
 

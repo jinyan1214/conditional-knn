@@ -4,7 +4,7 @@ import os
 import scipy.sparse as sparse
 import scipy.linalg
 from tqdm import tqdm
-from scipy.spatial import KDTree
+from scipy.spatial import KDTree, cKDTree
 
 # script_dir = os.path.dirname(__file__)
 # # Append the directory to conditional-knn
@@ -37,7 +37,8 @@ def cholesky_joint(
     rho: float,
     lambd: float | None = None,
     p: int = 1,
-    useMPI: bool = False
+    useMPI: bool = False,
+    verbose: bool = False,
 ) -> CholeskyFactor:
     """Computes Cholesky of the joint covariance."""
     if useMPI:
@@ -46,17 +47,19 @@ def cholesky_joint(
         rank = comm.Get_rank()
     else:
         rank = 0
-    if rank == 0:
+    if rank == 0 and verbose:
         print(f"Cholesky joint ordering, useMPI={useMPI}")
-    x, order, lengths = __joint_order(x_train, x_test, p=p)
-    if rank == 0:
+    x, order, lengths = __joint_order(x_train, x_test, p=p,
+                                      verbose=verbose)
+    if rank == 0 and verbose:
         print(f"Cholesky joint grouping, useMPI={useMPI}")
-    sparsity, groups = __cholesky_kl(x, lengths, rho, lambd)
+    sparsity, groups = __cholesky_kl(x, lengths, rho, lambd,
+                                      verbose=verbose)
     if useMPI:
         comm.Barrier()
-        if rank == 0:
+        if rank == 0 and verbose:
             print("Starting MPI Cholesky factorization")
-    return __mult_cholesky(x, kernel, sparsity, groups), order
+    return __mult_cholesky(x, kernel, sparsity, groups, useMPI), order
 
 
 def cholesky_joint_subsample(
@@ -68,7 +71,8 @@ def cholesky_joint_subsample(
     lambd: float | None = None,
     p: int = 1,
     select: Select = cknn.chol_select,
-    useMPI: bool = False
+    useMPI: bool = False,
+    verbose : bool = False,
 ) -> CholeskyFactor:
     """Cholesky of the joint covariance with subsampling."""
     # standard geometric algorithm
@@ -80,14 +84,14 @@ def cholesky_joint_subsample(
         rank = 0
     if rank == 0:
         print(f"Cholesky joint ordering, useMPI={useMPI}")
-    x, order, lengths = __joint_order(x_train, x_test, p=p)
+    x, order, lengths = __joint_order(x_train, x_test, p=p, verbose=verbose)
     if rank == 0:
         print(f"Cholesky joint grouping, useMPI={useMPI}")
-    sparsity, groups = __cholesky_kl(x, lengths, rho, lambd)
+    sparsity, groups = __cholesky_kl(x, lengths, rho, lambd, verbose=verbose)
     # create bigger sparsity pattern for candidates
     if rank == 0:
         print(f"Cholesky joint candidate sparsity, useMPI={useMPI}")
-    candidate_sparsity = sparsity_pattern(x, lengths, s * rho)
+    candidate_sparsity = sparsity_pattern(x, lengths, s * rho, debug=verbose)
     if rank == 0:
         print(f"Cholesky joint subsampling, useMPI={useMPI}")
     if useMPI:
@@ -104,15 +108,16 @@ def cholesky_joint_subsample(
 
 
 def __joint_order(
-    x_train: Points, x_test: Points, p: int = 1
+    x_train: Points, x_test: Points, p: int = 1,
+    verbose: bool = False
 ) -> tuple[Points, Ordering, LengthScales]:
     """Return the joint ordering and length scale."""
     # Don't include the eq_id for ordering
     x_train_sub = x_train[:, 1:]
     x_test_sub = x_test[:, 1:]
-    train_order, train_lengths = ordering.p_reverse_maximin(x_train_sub, p=p)
+    train_order, train_lengths = ordering.p_reverse_maximin(x_train_sub, p=p, verbose=verbose)
     # initialize test point ordering with training points
-    test_order, test_lengths = ordering.p_reverse_maximin(x_test_sub, x_train_sub, p=p)
+    test_order, test_lengths = ordering.p_reverse_maximin(x_test_sub, x_train_sub, p=p, verbose=verbose)
     # put testing points before training points (after in transpose)
     x = np.vstack((x_test[test_order], x_train[train_order]))
     order = np.append(test_order, x_test.shape[0] + train_order)
@@ -124,9 +129,10 @@ def __cholesky_kl(
     lengths: LengthScales,
     rho: float,
     lambd: float | None,
+    verbose: bool = False
 ) -> tuple[Sparsity, Grouping]:
     """Computes Cholesky given pre-ordered points and length scales."""
-    sparsity = sparsity_pattern(x, lengths, rho)
+    sparsity = sparsity_pattern(x, lengths, rho, debug=verbose)
     groups, sparsity = (
         ([[i] for i in range(len(x))], sparsity)
         if lambd is None
@@ -134,16 +140,21 @@ def __cholesky_kl(
     )
     return sparsity, groups
 
-def sparsity_pattern(x: Points, lengths: LengthScales, rho: float) -> Sparsity:
+def sparsity_pattern(x: Points, lengths: LengthScales, rho: float,
+                     debug: bool = False) -> Sparsity:
     """Compute the sparity pattern given the ordered x."""
     # O(n log^2 n + n s)
     x_sub = x[:, 1:]  # exclude eq_id for distance calculation
-    tree, offset, length_scale = KDTree(x_sub), 0, lengths[0]
+    tree, offset, length_scale = cKDTree(x_sub), 0, lengths[0]
     sparsity = {}
-    for i in range(len(x)):
+    if debug:
+        iteration = tqdm(range(len(x)))
+    else:
+        iteration = range(len(x))
+    for i in iteration:
         # length scale doubled, re-build tree to remove old points
         if lengths[i] > 2 * length_scale:
-            tree, offset, length_scale = KDTree(x_sub[i:]), i, lengths[i]
+            tree, offset, length_scale = cKDTree(x_sub[i:]), i, lengths[i]
         sparsity[i] = [
             offset + j
             for j in tree.query_ball_point(x_sub[i], rho * lengths[i])

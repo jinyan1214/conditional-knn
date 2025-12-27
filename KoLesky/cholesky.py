@@ -139,12 +139,12 @@ def __cols(x: Points, kernel: Kernel, s: list[int]) -> Matrix:
 
 
 def __mult_cholesky(
-    x: Points, kernel: Kernel, sparsity: Sparsity, groups: Grouping
+    x: Points, kernel: Kernel, sparsity: Sparsity, groups: Grouping,
+    useMPI: bool = False
 ) -> Sparse:
     """Computes the best Cholesky factor following the sparsity pattern."""
     # O((n/m)*(s^3 + m*s^2)) = O((n s^3)/m)
-    useMPI = os.getenv('useMPI', '0')
-    if useMPI == '1':
+    if useMPI:
         from mpi4py import MPI
         comm = MPI.COMM_WORLD
         rank = comm.Get_rank()
@@ -160,9 +160,11 @@ def __mult_cholesky(
     data = np.ascontiguousarray(data)
     indexes = np.ascontiguousarray(indexes)
 
-    owned_idx = np.array([], dtype=np.int64)
+    # owned_idx = np.array([], dtype=np.int64)
     # for group in groups:
     from tqdm import tqdm
+    # debug
+    # groups = groups[6000:8000]
     for grp_i, group in tqdm(enumerate(groups), total=len(groups), 
                              desc=f"Process {rank}/{size} Cholesky groups", leave=True):
         if grp_i % size != rank:
@@ -178,8 +180,12 @@ def __mult_cholesky(
             col = scipy.linalg.solve_triangular(L, e_k, lower=True)
             data[indptr[i] : indptr[i + 1]] = col[k:]
             indexes[indptr[i] : indptr[i + 1]] = s[k:]
-            owned_idx = np.concatenate((owned_idx, np.arange(indptr[i], indptr[i + 1], dtype=np.int64)))
-    if useMPI == '1':
+            # if useMPI:
+            #     owned_idx = np.concatenate((owned_idx, np.arange(indptr[i], indptr[i + 1], dtype=np.int64)))
+    if useMPI:
+        owned_group_i = np.arange(len(groups))[::size] + rank
+        owned_group_i = owned_group_i[owned_group_i < len(groups)]
+        owned_idx = np.concatenate([np.arange(indptr[i], indptr[i + 1], dtype=np.int64) for gi in owned_group_i for i in groups[gi]])
         print(f"Process {rank} finished its groups")
         # Use reduce to gather results
         # # gc.collect()
