@@ -27,3 +27,4 @@ lib/
 # virtual environment
 .venv/
 .vscode/
+.DS_Store
