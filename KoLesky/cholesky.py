@@ -76,8 +76,8 @@ def chol(theta: Matrix, sigma: float = 1e-6) -> Matrix:
             if sigma > 1e-3:
                 print(f"Warning: Added jitter of {sigma/10} to the diagonal")
             sigma *= 10
-            if sigma > 1e-1:
-                raise ValueError("Input matrix is not positive definite after adding jitter up to 1e-2")
+            if sigma > 100:
+                raise ValueError("Input matrix is not positive definite after adding jitter up to 10")
             
     # try:
     #     return np.linalg.cholesky(theta)

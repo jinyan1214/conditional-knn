@@ -1,5 +1,9 @@
 #!/bin/bash
 
+# This file is an example for setting up the conda environment and installing the
+# required packages for the conditional point selection method. You may need to 
+# modify it based on your HPC system and package requirements.
+
 HPC=caltech # caltech or stampede3
 # # load cuda and install pytorch with cuda support
 if [ "$HPC" = "caltech" ]; then
@@ -7,7 +11,7 @@ if [ "$HPC" = "caltech" ]; then
     module load cudnn/8.9.7.29-12-gcc-11.3.1-v7mrdbz
     conda_path=/home/jyzhao/miniconda3/bin/conda
     # This is openmpi 
-    module load mpi/latest
+    module load openmpi
 elif [ "$HPC" = "stampede3" ]; then
     # See module spider cuda/12.8
     # module load python/3.12.11
@@ -29,7 +33,9 @@ python setup.py build_ext --inplace
 
 if [ "$HPC" = "caltech" ]; then
     pip3 install torch torchvision --index-url https://download.pytorch.org/whl/cu126
-    conda install -c conda-forge openmpi mpi4py
+    # conda install -c conda-forge openmpi mpi4py
+
+    pip install mpi4py openmpi 
 elif [ "$HPC" = "stampede3" ]; then
     # See module spider cuda/12.8
     pip3 install torch torchvision
