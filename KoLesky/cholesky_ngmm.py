@@ -5,6 +5,9 @@ import scipy.sparse as sparse
 import scipy.linalg
 from tqdm import tqdm
 from scipy.spatial import KDTree, cKDTree
+import warnings
+
+SPARSITY_UPPER_LIM = 20000
 
 # script_dir = os.path.dirname(__file__)
 # # Append the directory to conditional-knn
@@ -55,6 +58,9 @@ def cholesky_joint(
         print(f"Cholesky joint grouping, useMPI={useMPI}")
     sparsity, groups = __cholesky_kl(x, lengths, rho, lambd,
                                       verbose=verbose)
+    if rank == 0 and verbose:
+        sparsity_size = max([len(v) for v in sparsity.values()])
+        print(f"Maximum sparsity size: {sparsity_size}")
     if useMPI:
         comm.Barrier()
         if rank == 0 and verbose:
@@ -160,5 +166,8 @@ def sparsity_pattern(x: Points, lengths: LengthScales, rho: float,
             for j in tree.query_ball_point(x_sub[i], rho * lengths[i])
             if offset + j >= i
         ]
+        if len(sparsity[i]) > SPARSITY_UPPER_LIM:
+            warnings.warn("Sparsity pattern exceeds upper limit! randomly selecting subset.", UserWarning)
+            sparsity[i] = np.random.choice(sparsity[i], SPARSITY_UPPER_LIM, replace=False).tolist()
 
     return sparsity
