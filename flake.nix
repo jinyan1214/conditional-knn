@@ -19,9 +19,11 @@
         inherit (maipkgs.legacyPackages.${system}) python python3Packages;
         python' = python.withPackages (ps: with ps; [
           cython
+          numpy
           pbbfmm3d
           pygments
           scikit-learn
+          scipy
           seaborn
           setuptools
         ]);
@@ -64,16 +66,6 @@
             python'
             pkgs.mkl
             maipkgs.packages.${system}.hlibpro
-            pkgs.boost183
-            pkgs.tbb_2021_11
-            pkgs.blas
-            pkgs.lapack
-            pkgs.metis
-            pkgs.zlib
-            pkgs.fftw
-            pkgs.hdf5_1_10
-            pkgs.gsl
-            pkgs.cgal
           ]
           ++ formatters
           ++ linters;
