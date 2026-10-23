@@ -42,6 +42,7 @@ def cholesky_joint(
     p: int = 1,
     useMPI: bool = False,
     verbose: bool = False,
+    exclude_cols: list[int] | None = None,
 ) -> CholeskyFactor:
     """Computes Cholesky of the joint covariance."""
     if useMPI:
@@ -53,7 +54,7 @@ def cholesky_joint(
     if rank == 0 and verbose:
         print(f"Cholesky joint ordering, useMPI={useMPI}")
     x, order, lengths = __joint_order(x_train, x_test, p=p,
-                                      verbose=verbose)
+                                      verbose=verbose, exclude_cols=exclude_cols)
     if rank == 0 and verbose:
         print(f"Cholesky joint grouping, useMPI={useMPI}")
     sparsity, groups = __cholesky_kl(x, lengths, rho, lambd,
@@ -79,6 +80,7 @@ def cholesky_joint_subsample(
     select: Select = cknn.chol_select,
     useMPI: bool = False,
     verbose : bool = False,
+    exclude_cols: list[int] | None = None,
 ) -> CholeskyFactor:
     """Cholesky of the joint covariance with subsampling."""
     # standard geometric algorithm
@@ -89,10 +91,10 @@ def cholesky_joint_subsample(
     else:
         rank = 0
     if rank == 0:
-        print(f"Cholesky joint ordering, useMPI={useMPI}")
-    x, order, lengths = __joint_order(x_train, x_test, p=p, verbose=verbose)
+        print(f"Cholesky joint ordering, useMPI={useMPI}, exclude_cols={exclude_cols}")
+    x, order, lengths = __joint_order(x_train, x_test, p=p, verbose=verbose, exclude_cols=exclude_cols)
     if rank == 0:
-        print(f"Cholesky joint grouping, useMPI={useMPI}")
+        print(f"Cholesky joint grouping, useMPI={useMPI}, exclude_cols={exclude_cols}")
     sparsity, groups = __cholesky_kl(x, lengths, rho, lambd, verbose=verbose)
     # create bigger sparsity pattern for candidates
     if rank == 0:
@@ -115,12 +117,17 @@ def cholesky_joint_subsample(
 
 def __joint_order(
     x_train: Points, x_test: Points, p: int = 1,
-    verbose: bool = False
+    verbose: bool = False,
+    exclude_cols: list[int] | None = None,
 ) -> tuple[Points, Ordering, LengthScales]:
     """Return the joint ordering and length scale."""
     # Don't include the eq_id for ordering
-    x_train_sub = x_train[:, 1:]
-    x_test_sub = x_test[:, 1:]
+    if exclude_cols is not None:
+        x_train_sub = np.delete(x_train, exclude_cols, axis=1)
+        x_test_sub = np.delete(x_test, exclude_cols, axis=1)
+    else:
+        x_train_sub = x_train
+        x_test_sub = x_test
     train_order, train_lengths = ordering.p_reverse_maximin(x_train_sub, p=p, verbose=verbose)
     # initialize test point ordering with training points
     test_order, test_lengths = ordering.p_reverse_maximin(x_test_sub, x_train_sub, p=p, verbose=verbose)
